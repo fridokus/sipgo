@@ -42,6 +42,21 @@ func uriStateScheme(uri *Uri, s string) (uriFSM, string, error) {
 	for i, c := range s {
 		if c == ':' {
 			uri.Scheme = ASCIIToLower(s[:i])
+
+			// A URN's namespace specific string is opaque (RFC 2141): it has
+			// no user, host or port, and the colons inside it separate
+			// namespaces rather than introducing a port. Handing
+			// "service:sos" on to the user and host states reads "sos" as a
+			// port and fails the whole URI, so a URN is taken verbatim and
+			// the FSM stops here.
+			if uri.Scheme == "urn" {
+				uri.Opaque = s[i+1:]
+				if uri.Opaque == "" {
+					return nil, "", fmt.Errorf("urn with no namespace specific string")
+				}
+				return nil, "", nil
+			}
+
 			return uriStateSlashes, s[i+1:], nil
 		}
 		// Check is c still ASCII

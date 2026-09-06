@@ -134,6 +134,94 @@ func TestParseUri(t *testing.T) {
 
 }
 
+func TestParseUriURN(t *testing.T) {
+	// A URN's namespace specific string is opaque (RFC 2141), so it is kept
+	// whole rather than split into user, host and port.
+
+	t.Run("service urn", func(t *testing.T) {
+		// The emergency service URN of RFC 5031, which a UE puts in the
+		// Request-URI of an emergency INVITE.
+		uri := Uri{}
+		err := ParseUri("urn:service:sos", &uri)
+		require.NoError(t, err)
+
+		assert.Equal(t, "urn", uri.Scheme)
+		assert.Equal(t, "service:sos", uri.Opaque)
+		assert.Equal(t, "", uri.User)
+		assert.Equal(t, "", uri.Host)
+		assert.Equal(t, 0, uri.Port)
+		assert.Equal(t, "urn:service:sos", uri.String())
+	})
+
+	t.Run("sub service urn", func(t *testing.T) {
+		uri := Uri{}
+		err := ParseUri("urn:service:sos.police", &uri)
+		require.NoError(t, err)
+		assert.Equal(t, "service:sos.police", uri.Opaque)
+		assert.Equal(t, "urn:service:sos.police", uri.String())
+	})
+
+	t.Run("uuid urn", func(t *testing.T) {
+		// RFC 4122, as carried by a +sip.instance media feature tag.
+		uri := Uri{}
+		err := ParseUri("urn:uuid:f81d4fae-7dec-11d0-a765-00a0c91e6bf6", &uri)
+		require.NoError(t, err)
+		assert.Equal(t, "uuid:f81d4fae-7dec-11d0-a765-00a0c91e6bf6", uri.Opaque)
+		assert.Equal(t, "urn:uuid:f81d4fae-7dec-11d0-a765-00a0c91e6bf6", uri.String())
+	})
+
+	t.Run("case insensitive scheme", func(t *testing.T) {
+		// Only the scheme is lowercased. The namespace specific string is
+		// opaque, so its case is preserved.
+		uri := Uri{}
+		err := ParseUri("URN:service:SOS", &uri)
+		require.NoError(t, err)
+		assert.Equal(t, "urn", uri.Scheme)
+		assert.Equal(t, "service:SOS", uri.Opaque)
+	})
+
+	t.Run("semicolon belongs to the namespace specific string", func(t *testing.T) {
+		// ";" is a legal NSS character (RFC 2141 <other>), and SIP
+		// uri-parameters are defined for SIP and SIPS URIs only (RFC 3261
+		// section 19.1.1) — a URN in a Request-URI is an absoluteURI and has
+		// none. So it stays inside the NSS rather than being split off, and
+		// the URI still round trips.
+		uri := Uri{}
+		err := ParseUri("urn:service:sos;lr", &uri)
+		require.NoError(t, err)
+
+		assert.Equal(t, "service:sos;lr", uri.Opaque)
+		assert.Equal(t, 0, uri.UriParams.Length())
+		assert.Equal(t, "urn:service:sos;lr", uri.String())
+	})
+
+	t.Run("params set by hand are still written", func(t *testing.T) {
+		// Parsing never puts them there, but an application constructing a
+		// URN by hand may, so the tail is written for it.
+		uri := Uri{Scheme: "urn", Opaque: "service:sos"}
+		uri.UriParams = NewParams()
+		uri.UriParams.Add("lr", "")
+		assert.Equal(t, "urn:service:sos;lr", uri.String())
+	})
+
+	t.Run("no namespace specific string", func(t *testing.T) {
+		uri := Uri{}
+		err := ParseUri("urn:", &uri)
+		require.Error(t, err)
+	})
+
+	t.Run("sip uri keeps opaque empty", func(t *testing.T) {
+		// Nothing that does not use a URN is affected.
+		uri := Uri{}
+		err := ParseUri("sip:alice@atlanta.com:5060", &uri)
+		require.NoError(t, err)
+		assert.Equal(t, "", uri.Opaque)
+		assert.Equal(t, "alice", uri.User)
+		assert.Equal(t, "atlanta.com", uri.Host)
+		assert.Equal(t, 5060, uri.Port)
+	})
+}
+
 func TestParseUriBad(t *testing.T) {
 	t.Run("double ports", func(t *testing.T) {
 		str := "sip:127.0.0.1:5060:5060;lr;transport=udp"

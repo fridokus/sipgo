@@ -12,6 +12,16 @@ import (
 type Uri struct {
 	Scheme string
 
+	// Opaque is the scheme specific part of a URI that has no user, host or
+	// port to parse into. A URN (RFC 2141) is the case SIP meets: its
+	// namespace specific string is opaque by definition, and the colons in it
+	// separate namespaces rather than introducing a port.
+	//
+	// It is carried and rendered exactly as it arrived, so a URN round trips
+	// byte for byte. Empty for every sip:, sips: and tel: URI, so nothing that
+	// does not use a URN is affected.
+	Opaque string
+
 	// If value is star (*)
 	Wildcard bool
 
@@ -64,6 +74,15 @@ func (uri *Uri) StringWrite(buffer io.StringWriter) {
 	buffer.WriteString(scheme)
 	buffer.WriteString(":")
 
+	// A URN has no user, host or port: its namespace specific string is opaque
+	// and is written back exactly as it was read. Parameters and headers still
+	// follow, because a URN in a To or From header is entitled to carry them.
+	if uri.Opaque != "" {
+		buffer.WriteString(uri.Opaque)
+		uri.stringWriteParams(buffer)
+		return
+	}
+
 	if uri.HierarhicalSlashes {
 		buffer.WriteString("//")
 	}
@@ -87,6 +106,12 @@ func (uri *Uri) StringWrite(buffer io.StringWriter) {
 		buffer.WriteString(strconv.Itoa(uri.Port))
 	}
 
+	uri.stringWriteParams(buffer)
+}
+
+// stringWriteParams writes the uri-parameters and headers, the tail a sip: URI
+// and a URN have in common.
+func (uri *Uri) stringWriteParams(buffer io.StringWriter) {
 	if (uri.UriParams != nil) && uri.UriParams.Length() > 0 {
 		buffer.WriteString(";")
 		buffer.WriteString(uri.UriParams.ToString(';'))

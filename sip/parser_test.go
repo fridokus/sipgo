@@ -430,6 +430,43 @@ func TestParseRequest(t *testing.T) {
 	assert.Equal(t, msg.String(), msgstr)
 }
 
+func TestParseRequestURN(t *testing.T) {
+	// RFC 3261 section 7.1 allows any absoluteURI as a Request-URI, and RFC
+	// 5031 defines the service URN a UE puts there for an emergency call. The
+	// failure this covers is not a wrong field but a lost message: reading
+	// "sos" as a port fails parseRequestLine, so the whole request is
+	// rejected and no handler ever runs.
+	rawMsg := []string{
+		"INVITE urn:service:sos SIP/2.0",
+		"Via: SIP/2.0/UDP 127.0.0.2:5060;branch=z9hG4bK-urn",
+		"From: \"Alice\" <sip:alice@127.0.0.2:5060>;tag=1928301774",
+		"To: <urn:service:sos>",
+		"Call-ID: gotest-urn",
+		"CSeq: 1 INVITE",
+		"Content-Length: 0",
+		"",
+		"",
+	}
+	msgstr := strings.Join(rawMsg, "\r\n")
+
+	parser := NewParser()
+	msg, err := parser.ParseSIP([]byte(msgstr))
+	require.NoError(t, err)
+
+	req, ok := msg.(*Request)
+	require.True(t, ok)
+	assert.Equal(t, INVITE, req.Method)
+	assert.Equal(t, "urn", req.Recipient.Scheme)
+	assert.Equal(t, "service:sos", req.Recipient.Opaque)
+	assert.Equal(t, "urn:service:sos", req.Recipient.String())
+
+	to := msg.To()
+	require.NotNil(t, to)
+	assert.Equal(t, "service:sos", to.Address.Opaque)
+
+	assert.Equal(t, msgstr, msg.String())
+}
+
 func TestParseRequestFoldedHeaders(t *testing.T) {
 	rawMsg := []string{
 		"INVITE sip:bob@127.0.0.1:5060 SIP/2.0",
