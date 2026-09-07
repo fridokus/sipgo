@@ -178,6 +178,10 @@ func (t *TransportTCP) readConnection(conn *TCPConnection, laddr string, raddr s
 	// Create stream parser context
 	par := t.parser.NewSIPStream()
 
+	// Whether the parser is part way through a message. A keep-alive is only a
+	// keep-alive between messages -- see the check below.
+	midMessage := false
+
 	for {
 		num, err := conn.Read(buf)
 		if err != nil {
@@ -213,7 +217,23 @@ func (t *TransportTCP) readConnection(conn *TCPConnection, laddr string, raddr s
 
 		// Check is keep alive
 		datalen := len(data)
-		if datalen <= 4 {
+		//
+		// ⚠️ Only between messages. RFC 5626 S.3.5.1 puts a keep-alive
+		// "between SIP messages", and a stream transport has no way to tell one
+		// from the CRLF *inside* a message except by asking the parser where it
+		// is. A read is whatever TCP chose to deliver, so the two bytes ending a
+		// header line arrive on their own often enough -- and every one of them
+		// used to be swallowed here, leaving the parser holding a bare CR that
+		// no later byte can complete. The next message then fails to frame with
+		// "line has no CRLF" although nothing is wrong with it, and because the
+		// buffer still holds the bytes it choked on, so does every message after
+		// that: the connection is deaf for good.
+		//
+		// 🔴 Found on a 10,000-UE IMS bed, where the I-CSCF stopped processing
+		// SIP entirely while its sockets drained normally and its CPU sat idle.
+		// Splitting a real 1568-byte REGISTER at any of its 22 CRLFs reproduces
+		// it every time; see TestReadConnectionKeepAliveMidMessage.
+		if datalen <= 4 && !midMessage {
 			// One or 2 CRLF
 			// https://datatracker.ietf.org/doc/html/rfc5626#section-3.5.1
 			if len(bytes.Trim(data, "\r\n")) == 0 {
@@ -232,7 +252,8 @@ func (t *TransportTCP) readConnection(conn *TCPConnection, laddr string, raddr s
 		// TODO fallback to parseFull if message size limit is set
 
 		// t.log.Debug().Str("raddr", raddr).Str("data", string(data)).Msg("new message")
-		if err := t.parseStream(par, data, raddr, handler); err != nil {
+		partial, err := t.parseStream(par, data, raddr, handler)
+		if err != nil {
 			// Any framing error at all, not only ErrMessageTooLarge. A SIP
 			// stream carries no delimiter to resynchronise on — RFC 3261
 			// S.7 frames a message by its headers and Content-Length, and
@@ -252,11 +273,15 @@ func (t *TransportTCP) readConnection(conn *TCPConnection, laddr string, raddr s
 			// new connection (RFC 3261 S.18.3).
 			return
 		}
+		midMessage = partial
 	}
 }
 
-func (t *TransportTCP) parseStream(par *ParserStream, data []byte, src string, handler MessageHandler) error {
-	err := par.ParseSIPStream(data, func(msg Message) {
+// parseStream feeds one read to the parser. It reports whether the parser is
+// left part way through a message, which is what tells [TransportTCP.readConnection]
+// that a CRLF-only read is a continuation rather than a keep-alive.
+func (t *TransportTCP) parseStream(par *ParserStream, data []byte, src string, handler MessageHandler) (midMessage bool, err error) {
+	err = par.ParseSIPStream(data, func(msg Message) {
 		msg.SetTransport(t.Network())
 		msg.SetSource(src)
 		handler(msg)
@@ -264,12 +289,15 @@ func (t *TransportTCP) parseStream(par *ParserStream, data []byte, src string, h
 
 	if err != nil {
 		if err == ErrParseSipPartial {
-			return nil
+			// ⓘ The one return that says "not finished". ParseSIPStream drains
+			// its buffer before it returns nil, so nil means the read ended on
+			// a message boundary and anything after it starts a new message.
+			return true, nil
 		}
 		t.log.Error("failed to parse", "error", err, "data", string(data))
-		return err
+		return false, err
 	}
-	return nil
+	return false, nil
 }
 
 type TCPConnection struct {
