@@ -232,10 +232,24 @@ func (t *TransportTCP) readConnection(conn *TCPConnection, laddr string, raddr s
 		// TODO fallback to parseFull if message size limit is set
 
 		// t.log.Debug().Str("raddr", raddr).Str("data", string(data)).Msg("new message")
-		if err := t.parseStream(par, data, raddr, handler); errors.Is(err, ErrMessageTooLarge) {
-			// The parser could not frame a message within the size limit, so there
-			// is no boundary left to resync on. Reading on would only let the peer
-			// repeat it, so close the connection instead.
+		if err := t.parseStream(par, data, raddr, handler); err != nil {
+			// Any framing error at all, not only ErrMessageTooLarge. A SIP
+			// stream carries no delimiter to resynchronise on — RFC 3261
+			// S.7 frames a message by its headers and Content-Length, and
+			// both of those are what has just failed to parse — so the
+			// parser's buffer still holds the bytes it choked on, and every
+			// later read appends behind them and fails at the same byte.
+			// Continuing leaves the connection open and permanently deaf:
+			// the peer goes on sending, the transport goes on reading, and
+			// nothing is ever delivered to a handler again.
+			//
+			// 🔴 Found on a 10,000-UE bed. One malformed read on the
+			// S-CSCF -> P-CSCF connection silently ended terminating call
+			// delivery for the whole element; the S-CSCF forwarded every
+			// INVITE, the P-CSCF never saw one, and every call timed out at
+			// 30 s with no error anywhere but this log line. Closing hands
+			// the peer the one recovery a stream transport has, which is a
+			// new connection (RFC 3261 S.18.3).
 			return
 		}
 	}

@@ -336,3 +336,65 @@ func TestTransportLayerResolving(t *testing.T) {
 	assert.True(t, addr.IP.To4() != nil)
 	assert.Equal(t, "127.0.0.1:0", addr.String())
 }
+
+// TestTransportLayerTCPUnframeableStreamClosesConnection is RFC 3261 S.18.3
+// applied to the only recovery a stream transport has.
+//
+// A SIP stream carries no delimiter to resynchronise on: a message is framed by
+// its own headers and its Content-Length, and both of those are what has just
+// failed to parse. So the parser's buffer still holds the bytes it choked on,
+// every later read appends behind them, and every later parse fails at the same
+// byte. Reading on leaves the connection open and permanently deaf — the peer
+// keeps sending, the transport keeps reading, and no message reaches a handler
+// ever again. Closing hands the peer the one recovery it has, a new connection.
+//
+// 🔴 Found on a 10,000-UE bed, where this was not a theoretical state. One
+// malformed read on the S-CSCF -> P-CSCF connection ended terminating call
+// delivery for the whole element: the S-CSCF forwarded every INVITE, the
+// P-CSCF's request counter never moved, and every call failed at 30 seconds
+// with no symptom anywhere except a repeating "failed to parse" log line.
+//
+// ⚠️ The second, well-formed OPTIONS is what makes this a test rather than an
+// assertion about an error value. Before the fix the transport stayed in its
+// read loop and swallowed it, so "the handler is never called" held for the
+// wrong reason and only the close distinguishes the two.
+func TestTransportLayerTCPUnframeableStreamClosesConnection(t *testing.T) {
+	tcp := &TransportTCP{}
+	tcp.init(NewParser())
+
+	closed := make(chan struct{})
+	tcp.onConnClose = func(conn Connection) { close(closed) }
+
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+
+	conn := &TCPConnection{Conn: serverConn, refcount: 1}
+
+	delivered := make(chan Message, 2)
+	go tcp.readConnection(conn, serverConn.LocalAddr().String(), serverConn.RemoteAddr().String(),
+		func(msg Message) { delivered <- msg })
+
+	// A bare CR where the framing needs CRLF. Not "a message we dislike": it is
+	// a message the parser cannot find the end of, which is the whole point.
+	_, err := clientConn.Write([]byte(
+		"OPTIONS sip:example.com SIP/2.0\r\n" +
+			"Via: SIP/2.0/TCP 127.0.0.1:5060;branch=z9hG4bK-bad\rTo: <sip:bob@example.com>\r\n" +
+			"Content-Length: 0\r\n\r\n"))
+	require.NoError(t, err)
+
+	select {
+	case <-closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the connection is still open after a stream that cannot be framed, so it is deaf rather than closed")
+	}
+
+	// Nothing was delivered from the unframeable stream, and nothing can be:
+	// the write below fails precisely because the connection is gone, which is
+	// the outcome under test.
+	_, _ = clientConn.Write(testRawOptions("after-the-break"))
+	select {
+	case msg := <-delivered:
+		t.Fatalf("a message was delivered out of an unframeable stream: %v", msg)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
