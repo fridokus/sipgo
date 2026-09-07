@@ -178,6 +178,10 @@ func (t *TransportTCP) readConnection(conn *TCPConnection, laddr string, raddr s
 	// Create stream parser context
 	par := t.parser.NewSIPStream()
 
+	// Whether the parser is part way through a message. A keep-alive only
+	// counts between messages -- see the check below.
+	midMessage := false
+
 	for {
 		num, err := conn.Read(buf)
 		if err != nil {
@@ -213,7 +217,12 @@ func (t *TransportTCP) readConnection(conn *TCPConnection, laddr string, raddr s
 
 		// Check is keep alive
 		datalen := len(data)
-		if datalen <= 4 {
+		// Only between messages. RFC 5626 section 3.5.1 puts a keep-alive
+		// between SIP messages, and a read is whatever TCP chose to deliver, so
+		// the CRLF ending a header line can arrive on its own. Swallowing that
+		// leaves the parser holding a bare CR it can never complete, and every
+		// later message on the connection fails to frame.
+		if datalen <= 4 && !midMessage {
 			// One or 2 CRLF
 			// https://datatracker.ietf.org/doc/html/rfc5626#section-3.5.1
 			if len(bytes.Trim(data, "\r\n")) == 0 {
@@ -232,15 +241,20 @@ func (t *TransportTCP) readConnection(conn *TCPConnection, laddr string, raddr s
 		// TODO fallback to parseFull if message size limit is set
 
 		// t.log.Debug().Str("raddr", raddr).Str("data", string(data)).Msg("new message")
-		if err := t.parseStream(par, data, raddr, handler); err != nil {
+		partial, err := t.parseStream(par, data, raddr, handler)
+		if err != nil {
 			// A framing error leaves no message boundary to resync on, so close the connection.
 			return
 		}
+		midMessage = partial
 	}
 }
 
-func (t *TransportTCP) parseStream(par *ParserStream, data []byte, src string, handler MessageHandler) error {
-	err := par.ParseSIPStream(data, func(msg Message) {
+// parseStream feeds one read to the parser. It reports whether the parser is
+// left part way through a message, which is what tells [TransportTCP.readConnection]
+// that a CRLF-only read is a continuation rather than a keep-alive.
+func (t *TransportTCP) parseStream(par *ParserStream, data []byte, src string, handler MessageHandler) (midMessage bool, err error) {
+	err = par.ParseSIPStream(data, func(msg Message) {
 		msg.SetTransport(t.Network())
 		msg.SetSource(src)
 		handler(msg)
@@ -248,12 +262,14 @@ func (t *TransportTCP) parseStream(par *ParserStream, data []byte, src string, h
 
 	if err != nil {
 		if err == ErrParseSipPartial {
-			return nil
+			// ParseSIPStream drains its buffer before returning nil, so a nil
+			// return means the read ended on a message boundary.
+			return true, nil
 		}
 		t.log.Error("failed to parse", "error", err, "data", string(data))
-		return err
+		return false, err
 	}
-	return nil
+	return false, nil
 }
 
 type TCPConnection struct {
