@@ -308,6 +308,9 @@ type TCPConnection struct {
 
 	mu       sync.RWMutex
 	refcount int
+	// hardClosed records that [TCPConnection.Close] ended this connection,
+	// rather than its last reference going. Read by TryClose; see there.
+	hardClosed bool
 }
 
 func (c *TCPConnection) Ref(i int) int {
@@ -322,6 +325,7 @@ func (c *TCPConnection) Ref(i int) int {
 func (c *TCPConnection) Close() error {
 	c.mu.Lock()
 	c.refcount = 0
+	c.hardClosed = true
 	c.mu.Unlock()
 	DefaultLogger().Debug("TCP doing hard close", "ip", c.LocalAddr().String(), "dst", c.RemoteAddr().String(), "ref", 0)
 	return c.Conn.Close()
@@ -331,6 +335,7 @@ func (c *TCPConnection) TryClose() (int, error) {
 	c.mu.Lock()
 	c.refcount--
 	ref := c.refcount
+	hard := c.hardClosed
 	c.mu.Unlock()
 	DefaultLogger().Debug("TCP reference decrement", "ip", c.LocalAddr().String(), "dst", c.RemoteAddr().String(), "ref", ref)
 	if ref > 0 {
@@ -338,6 +343,16 @@ func (c *TCPConnection) TryClose() (int, error) {
 	}
 
 	if ref < 0 {
+		// A hard close sets the count to zero under whoever is still holding a
+		// reference, so each of those holders drives it below zero as it
+		// leaves. That is how a connection is deliberately taken away from its
+		// readers, not a miscounted reference, and warning once per holder
+		// buries the case this warning exists for: a release of a reference
+		// that was never taken.
+		if hard {
+			DefaultLogger().Debug("TCP reference released after a hard close", "ip", c.LocalAddr().String(), "dst", c.RemoteAddr().String(), "ref", ref)
+			return 0, nil
+		}
 		DefaultLogger().Warn("TCP ref went negative", "ip", c.LocalAddr().String(), "dst", c.RemoteAddr().String(), "ref", ref)
 		return 0, nil
 	}

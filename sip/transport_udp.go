@@ -243,6 +243,12 @@ type UDPConnection struct {
 
 	mu       sync.RWMutex
 	refcount int
+	// hardClosed records that [UDPConnection.Close] ended this connection,
+	// rather than its last reference going. Read by TryClose; see there.
+	//
+	// ⓘ Set by Close and not by close, which TryClose also calls once the count
+	// reaches zero. A release after *that* really is one too many.
+	hardClosed bool
 }
 
 func (c *UDPConnection) close() error {
@@ -272,6 +278,9 @@ func (c *UDPConnection) Ref(i int) int {
 }
 
 func (c *UDPConnection) Close() error {
+	c.mu.Lock()
+	c.hardClosed = true
+	c.mu.Unlock()
 	return c.close()
 }
 
@@ -279,6 +288,7 @@ func (c *UDPConnection) TryClose() (int, error) {
 	c.mu.Lock()
 	c.refcount--
 	ref := c.refcount
+	hard := c.hardClosed
 	c.mu.Unlock()
 
 	if c.Listener {
@@ -292,6 +302,16 @@ func (c *UDPConnection) TryClose() (int, error) {
 	}
 
 	if ref < 0 {
+		// A hard close sets the count to zero under whoever is still holding a
+		// reference, so each of those holders drives it below zero as it
+		// leaves. That is how a connection is deliberately taken away from its
+		// readers, not a miscounted reference, and warning once per holder
+		// buries the case this warning exists for: a release of a reference
+		// that was never taken.
+		if hard {
+			DefaultLogger().Debug("UDP reference released after a hard close", "src", c.LocalAddr().String(), "ref", ref)
+			return 0, nil
+		}
 		DefaultLogger().Warn("UDP ref went negative on try close", "src", c.LocalAddr().String(), "ref", ref)
 		return 0, nil
 	}

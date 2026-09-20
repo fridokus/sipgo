@@ -333,6 +333,9 @@ type WSConnection struct {
 
 	mu       sync.RWMutex
 	refcount int
+	// hardClosed records that [WSConnection.Close] ended this connection,
+	// rather than its last reference going. Read by TryClose; see there.
+	hardClosed bool
 }
 
 func (c *WSConnection) Ref(i int) int {
@@ -348,6 +351,7 @@ func (c *WSConnection) Ref(i int) int {
 func (c *WSConnection) Close() error {
 	c.mu.Lock()
 	c.refcount = 0
+	c.hardClosed = true
 	c.mu.Unlock()
 	DefaultLogger().Debug("WS doing hard close", "ip", c.RemoteAddr().String())
 	return c.Conn.Close()
@@ -357,6 +361,7 @@ func (c *WSConnection) TryClose() (int, error) {
 	c.mu.Lock()
 	c.refcount--
 	ref := c.refcount
+	hard := c.hardClosed
 	c.mu.Unlock()
 	DefaultLogger().Debug("WS reference decrement", "ip", c.RemoteAddr().String(), "ref", ref)
 	if ref > 0 {
@@ -364,6 +369,16 @@ func (c *WSConnection) TryClose() (int, error) {
 	}
 
 	if ref < 0 {
+		// A hard close sets the count to zero under whoever is still holding a
+		// reference, so each of those holders drives it below zero as it
+		// leaves. That is how a connection is deliberately taken away from its
+		// readers, not a miscounted reference, and warning once per holder
+		// buries the case this warning exists for: a release of a reference
+		// that was never taken.
+		if hard {
+			DefaultLogger().Debug("WS reference released after a hard close", "ip", c.RemoteAddr().String(), "ref", ref)
+			return 0, nil
+		}
 		DefaultLogger().Warn("WS ref went negative", "ip", c.RemoteAddr().String(), "ref", ref)
 		return 0, nil
 	}
