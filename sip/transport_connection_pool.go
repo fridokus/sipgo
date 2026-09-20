@@ -144,11 +144,21 @@ func (p *connectionPool) getUnref(a string) (c Connection) {
 	return c
 }
 
-// CloseAndDelete closes connection and deletes from pool
+// CloseAndDelete closes connection and deletes from pool.
+//
+// An address is only a name for a connection, and names get reused. A peer that
+// reconnects from the same source port — a SIP UE re-registering, say — produces
+// a successor filed under a key its predecessor already holds, and Add lets the
+// successor win it, which is what we want: the newer connection is the reachable
+// one. Deleting by name alone would then let the predecessor's reader, exiting
+// afterwards as it must, evict a connection it has nothing to do with. The
+// successor stays open and stays read, and only the pool forgets it, so nothing
+// re-adds it; every message routed to that address dials a second connection or
+// fails outright. Remove the entry only while it still names c.
 func (p *connectionPool) CloseAndDelete(c Connection, addr string) error {
 	p.Lock()
 	defer p.Unlock()
-	delete(p.m, addr)
+	p.deleteIfCurrent(addr, c)
 	ref, _ := c.TryClose() // Be nice. Saves from double closing
 	if ref > 0 {
 		return c.Close()
@@ -156,18 +166,31 @@ func (p *connectionPool) CloseAndDelete(c Connection, addr string) error {
 	return nil
 }
 
-func (p *connectionPool) Delete(addr string) {
+// Delete removes addr from the pool if it still names c. See [connectionPool.CloseAndDelete]
+// for why the connection and not just the address has to be matched.
+func (p *connectionPool) Delete(addr string, c Connection) {
 	p.Lock()
 	defer p.Unlock()
-	delete(p.m, addr)
+	p.deleteIfCurrent(addr, c)
 }
 
-func (p *connectionPool) DeleteMultiple(addrs []string) {
+// DeleteMultiple removes each of addrs that still names c. See
+// [connectionPool.CloseAndDelete] for why c has to be matched.
+func (p *connectionPool) DeleteMultiple(addrs []string, c Connection) {
 	p.Lock()
 	defer p.Unlock()
 	for _, a := range addrs {
-		delete(p.m, a)
+		p.deleteIfCurrent(a, c)
 	}
+}
+
+// deleteIfCurrent drops addr only while it still resolves to c. Callers hold the
+// lock.
+func (p *connectionPool) deleteIfCurrent(addr string, c Connection) {
+	if existing, ok := p.m[addr]; ok && existing != c {
+		return
+	}
+	delete(p.m, addr)
 }
 
 // Clear will clear all connection from pool and close them
