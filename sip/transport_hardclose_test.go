@@ -48,7 +48,7 @@ func (w *warnRecorder) messages() []string {
 func recordWarnings(t *testing.T) *warnRecorder {
 	t.Helper()
 	w := &warnRecorder{}
-	prev := defLogger
+	prev := DefaultLogger()
 	SetDefaultLogger(slog.New(w))
 	t.Cleanup(func() { SetDefaultLogger(prev) })
 	return w
