@@ -109,8 +109,50 @@ func TestConnectionPoolSizeDuringConnectionCreation(t *testing.T) {
 	close(done)
 	reader.Wait()
 
-	if got := pool.Size(); got != connections+1 {
-		t.Fatalf("got %d address entries, want %d", got, connections+1)
+	// No local address was chosen, so each connection is filed under its
+	// remote address alone.
+	if got := pool.Size(); got != connections {
+		t.Fatalf("got %d address entries, want %d", got, connections)
+	}
+}
+
+func TestConnectionPoolFilesADialedConnectionUnderALocalAddressOnlyWhenChosen(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		laddr     Addr
+		reuse     bool
+		wantLocal bool
+	}{
+		{"kernel picked the port", Addr{}, true, false},
+		{"kernel picked the port without reuse", Addr{}, false, false},
+		{"kernel picked the port of a chosen IP", Addr{IP: net.ParseIP("127.0.0.1")}, true, false},
+		{"port chosen", Addr{IP: net.ParseIP("127.0.0.1"), Port: 5060}, true, true},
+		{"port chosen without reuse", Addr{IP: net.ParseIP("127.0.0.1"), Port: 5060}, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := newConnectionPool()
+			conn := poolTestConnection()
+			raddr := Addr{IP: net.ParseIP("127.0.0.2"), Port: 5060}
+
+			c, err := pool.addSingleflight(raddr, tc.laddr, tc.reuse,
+				func() (Connection, error) { return conn, nil })
+			if err != nil {
+				t.Fatalf("create pooled connection: %v", err)
+			}
+			if c != conn {
+				t.Fatal("did not return the created connection")
+			}
+			if got := pool.Get(raddr.String()); got != conn {
+				t.Fatal("not filed under its remote address")
+			}
+			local := pool.Get(conn.LocalAddr().String())
+			if tc.wantLocal && local != conn {
+				t.Fatal("not filed under the local address it was asked to use")
+			}
+			if !tc.wantLocal && local != nil {
+				t.Fatal("filed under a local address the kernel picked")
+			}
+		})
 	}
 }
 
