@@ -110,17 +110,19 @@ func (p *ConnectionPool) addSingleflight(raddr Addr, laddr Addr, reuse bool, do 
 // addDialedLocked files a connection this side dialed under its remote address,
 // and under its local address only when the caller chose that address.
 //
-// A chosen local address is what a request's Laddr later looks the connection
-// up by. A port the kernel picked is never looked up, and Linux will pick a
-// port already in use as long as the connection leads somewhere else. So a
-// peer on the same IP may be connected from it, and its accepted connection is
-// filed under that same address as its remote one: filing the dialed connection
-// there would send that peer's responses to whoever was dialed.
+// A local address is looked up only when a request's Laddr names both an IP and
+// a port (see TransportLayer.ClientRequestConnection), and only then is it the
+// address the connection was bound to. A port the kernel picked is never looked
+// up, and Linux will pick a port already in use as long as the connection leads
+// somewhere else. So a peer on the same IP may be connected from it, and its
+// accepted connection is filed under that same address as its remote one:
+// filing the dialed connection there would send that peer's responses to
+// whoever was dialed.
 //
 // Requires p.mu to be held for writing.
 func (p *ConnectionPool) addDialedLocked(raddr string, laddr Addr, c Connection) {
 	p.m[raddr] = c
-	if laddr.Port > 0 {
+	if laddr.IP != nil && laddr.Port > 0 {
 		p.m[c.LocalAddr().String()] = c
 	}
 }

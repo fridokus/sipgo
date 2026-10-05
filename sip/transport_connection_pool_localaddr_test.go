@@ -34,39 +34,61 @@ func sharePort(_, _ string, c syscall.RawConn) error {
 // over the connection that request arrived on, not over the one the element
 // dialed. (RFC 3261 section 18.2.2)
 func TestTCPDialFromAnAcceptedPeersAddressDoesNotTakeItsResponses(t *testing.T) {
+	// Where the element's own connection leads: anything that arrives here is
+	// a response that went astray. Cleanups run last-registered first, so this
+	// one waits until the element has closed the connection it dialed here,
+	// which is what ends the read.
+	elsewhere, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	misdelivered := make(chan string, 1)
+	received := make(chan struct{})
+	go func() {
+		defer close(received)
+		conn, err := elsewhere.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+		line, _ := bufio.NewReader(conn).ReadString('\n')
+		misdelivered <- line
+	}()
+	t.Cleanup(func() {
+		elsewhere.Close()
+		<-received
+	})
+
 	tp := NewTransportLayer(net.DefaultResolver, NewParser(), nil)
 	txl := NewTransactionLayer(tp)
-	defer func() { require.NoError(t, tp.Close()) }()
-	defer txl.Close()
+	t.Cleanup(func() {
+		txl.Close()
+		if err := tp.Close(); err != nil {
+			t.Errorf("close transport layer: %v", err)
+		}
+	})
 	txl.OnRequest(func(req *Request, tx *ServerTx) {
 		_ = tx.Respond(NewResponseFromRequest(req, StatusOK, "OK", nil))
 	})
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	go tp.ServeTCP(ln)
+	served := make(chan struct{})
+	go func() {
+		defer close(served)
+		_ = tp.ServeTCP(ln)
+	}()
+	t.Cleanup(func() {
+		ln.Close()
+		<-served
+	})
 
 	peerDialer := net.Dialer{LocalAddr: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)}, Control: sharePort}
 	peer, err := peerDialer.Dial("tcp", ln.Addr().String())
 	require.NoError(t, err)
-	defer peer.Close()
+	t.Cleanup(func() { peer.Close() })
 	shared := peer.LocalAddr().(*net.TCPAddr)
 	require.Eventually(t, func() bool { return tp.tcp.pool.getUnref(shared.String()) != nil },
 		2*time.Second, 5*time.Millisecond, "the element never accepted the peer's connection")
-
-	elsewhere, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	defer elsewhere.Close()
-	misdelivered := make(chan string, 1)
-	go func() {
-		conn, err := elsewhere.Accept()
-		if err != nil {
-			return
-		}
-		defer conn.Close()
-		line, _ := bufio.NewReader(conn).ReadString('\n')
-		misdelivered <- line
-	}()
 
 	// No local address is asked of sipgo, so the kernel chooses one, and it
 	// is allowed to choose the port the peer's connection comes from.

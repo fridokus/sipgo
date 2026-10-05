@@ -126,6 +126,7 @@ func TestConnectionPoolFilesADialedConnectionUnderALocalAddressOnlyWhenChosen(t 
 		{"kernel picked the port", Addr{}, true, false},
 		{"kernel picked the port without reuse", Addr{}, false, false},
 		{"kernel picked the port of a chosen IP", Addr{IP: net.ParseIP("127.0.0.1")}, true, false},
+		{"port without an IP", Addr{Port: 5060}, true, false},
 		{"port chosen", Addr{IP: net.ParseIP("127.0.0.1"), Port: 5060}, true, true},
 		{"port chosen without reuse", Addr{IP: net.ParseIP("127.0.0.1"), Port: 5060}, false, true},
 	} {
