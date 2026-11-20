@@ -18,6 +18,13 @@ type Request struct {
 	Laddr Addr
 	// raddr is address set after resolving Via
 	raddr Addr
+
+	// arrivedOn is the stream connection this request was read from, and nil
+	// for a datagram or a request this process built. The response goes back
+	// over it while it is open: RFC 3261 S.18.2.2. See
+	// [TransportLayer.serverRequestConnection] for why the source address
+	// alone cannot find it.
+	arrivedOn Connection
 }
 
 // NewRequest creates base for building sip Request

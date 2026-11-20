@@ -240,7 +240,7 @@ func (t *TransportTCP) readConnection(conn *TCPConnection, laddr string, raddr s
 		// TODO fallback to parseFull if message size limit is set
 
 		// t.log.Debug().Str("raddr", raddr).Str("data", string(data)).Msg("new message")
-		parseErr = t.parseStream(par, data, raddr, handler)
+		parseErr = t.parseStream(par, data, conn, raddr, handler)
 		if parseErr != nil && !errors.Is(parseErr, ErrParseSipPartial) {
 			// A framing error leaves no message boundary to resync on, so close the connection.
 			return
@@ -248,10 +248,13 @@ func (t *TransportTCP) readConnection(conn *TCPConnection, laddr string, raddr s
 	}
 }
 
-func (t *TransportTCP) parseStream(par *ParserStream, data []byte, src string, handler MessageHandler) error {
+func (t *TransportTCP) parseStream(par *ParserStream, data []byte, conn *TCPConnection, src string, handler MessageHandler) error {
 	err := par.ParseSIPStream(data, func(msg Message) {
 		msg.SetTransport(t.Network())
 		msg.SetSource(src)
+		if req, ok := msg.(*Request); ok && conn != nil {
+			req.arrivedOn = conn
+		}
 		handler(msg)
 	})
 
@@ -289,6 +292,19 @@ func (c *TCPConnection) Close() error {
 	c.mu.Unlock()
 	DefaultLogger().Debug("TCP doing hard close", "ip", c.LocalAddr().String(), "dst", c.RemoteAddr().String(), "ref", 0)
 	return c.Conn.Close()
+}
+
+// refIfOpen takes a reference to the connection if it is still open, and
+// reports whether it did. A connection is open until it is hard closed or its
+// last reference goes, and either of those has already closed the socket.
+func (c *TCPConnection) refIfOpen() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.hardClosed || c.refcount <= 0 {
+		return false
+	}
+	c.refcount++
+	return true
 }
 
 func (c *TCPConnection) TryClose() (int, error) {
