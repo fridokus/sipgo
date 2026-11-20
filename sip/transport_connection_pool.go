@@ -80,7 +80,18 @@ func (p *connectionPool) addSingleflight(raddr Addr, laddr Addr, reuse bool, do 
 			defer p.Unlock()
 
 			p.m[a] = c
-			p.m[c.LocalAddr().String()] = c
+			// A local address is looked up only when a request's Laddr names
+			// both an IP and a port (see TransportLayer.ClientRequestConnection),
+			// and only then is it the address the connection was bound to. A
+			// port the kernel picked is never looked up, and Linux will pick a
+			// port already in use as long as the connection leads somewhere
+			// else. So a peer on the same IP may be connected from it, and its
+			// accepted connection is filed under that same address as its
+			// remote one: filing the dialed connection there would send that
+			// peer's responses to whoever was dialed.
+			if laddr.IP != nil && laddr.Port > 0 {
+				p.m[c.LocalAddr().String()] = c
+			}
 			return c, nil
 		})
 		if err != nil {
@@ -101,7 +112,10 @@ func (p *connectionPool) addSingleflight(raddr Addr, laddr Addr, reuse bool, do 
 		c.Ref(1) // Make 1 reference count by default
 	}
 	p.m[a] = c
-	p.m[c.LocalAddr().String()] = c
+	// Only a chosen local address, as above.
+	if laddr.IP != nil && laddr.Port > 0 {
+		p.m[c.LocalAddr().String()] = c
+	}
 	return c, nil
 }
 

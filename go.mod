@@ -1,4 +1,4 @@
-module github.com/emiago/sipgo
+module ericsson.com/on-demand/sipgo
 
 go 1.23.0
 
