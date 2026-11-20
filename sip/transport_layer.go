@@ -467,6 +467,26 @@ func (l *TransportLayer) serverRequestConnection(ctx context.Context, req *Reque
 		return nil, fmt.Errorf("transport %s is not supported", network)
 	}
 
+	// RFC 3261 S.18.2.2: "the response MUST be sent using the existing
+	// connection to the source of the original request that created the
+	// transaction, if that connection is still open."
+	//
+	// The pool cannot be relied on to name that connection. It files an
+	// accepted connection under its remote address alone, so two connections
+	// from one address to two of our ports share a key, and the later accept
+	// takes it. Behind a NAT that is not contrived: a NAT allocates a
+	// cleartext source port that a UE behind the same public address already
+	// uses as its protected client port (TS 33.203 clause 7.1), and the UE's
+	// requests are then answered on the other UE's connection. When that
+	// connection closes it deletes the key, and every later response is a
+	// dial to the Via port, which a UE does not listen on for this, so the
+	// request is never answered at all.
+	if IsReliable(network) {
+		if c, ok := req.arrivedOn.(interface{ refIfOpen() bool }); ok && c.refIfOpen() {
+			return req.arrivedOn, nil
+		}
+	}
+
 	sourceAddr := req.MessageData.Source()
 	if IsReliable(network) && sourceAddr != "" {
 		// If the "sent-protocol" is a reliable transport protocol such as

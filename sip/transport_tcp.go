@@ -252,7 +252,7 @@ func (t *TransportTCP) readConnection(conn *TCPConnection, laddr string, raddr s
 		// TODO fallback to parseFull if message size limit is set
 
 		// t.log.Debug().Str("raddr", raddr).Str("data", string(data)).Msg("new message")
-		partial, err := t.parseStream(par, data, raddr, handler)
+		partial, err := t.parseStream(par, data, conn, raddr, handler)
 		if err != nil {
 			// Any framing error at all, not only ErrMessageTooLarge. A SIP
 			// stream carries no delimiter to resynchronise on — RFC 3261
@@ -280,10 +280,13 @@ func (t *TransportTCP) readConnection(conn *TCPConnection, laddr string, raddr s
 // parseStream feeds one read to the parser. It reports whether the parser is
 // left part way through a message, which is what tells [TransportTCP.readConnection]
 // that a CRLF-only read is a continuation rather than a keep-alive.
-func (t *TransportTCP) parseStream(par *ParserStream, data []byte, src string, handler MessageHandler) (midMessage bool, err error) {
+func (t *TransportTCP) parseStream(par *ParserStream, data []byte, conn *TCPConnection, src string, handler MessageHandler) (midMessage bool, err error) {
 	err = par.ParseSIPStream(data, func(msg Message) {
 		msg.SetTransport(t.Network())
 		msg.SetSource(src)
+		if req, ok := msg.(*Request); ok && conn != nil {
+			req.arrivedOn = conn
+		}
 		handler(msg)
 	})
 
@@ -329,6 +332,19 @@ func (c *TCPConnection) Close() error {
 	c.mu.Unlock()
 	DefaultLogger().Debug("TCP doing hard close", "ip", c.LocalAddr().String(), "dst", c.RemoteAddr().String(), "ref", 0)
 	return c.Conn.Close()
+}
+
+// refIfOpen takes a reference to the connection if it is still open, and
+// reports whether it did. A connection is open until it is hard closed or its
+// last reference goes, and either of those has already closed the socket.
+func (c *TCPConnection) refIfOpen() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.hardClosed || c.refcount <= 0 {
+		return false
+	}
+	c.refcount++
+	return true
 }
 
 func (c *TCPConnection) TryClose() (int, error) {
