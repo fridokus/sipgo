@@ -11,6 +11,9 @@ type ServerTx struct {
 	acks chan *Request
 	// cancels chan *Request
 	onCancel     func(r *Request)
+	proxyCancel  bool
+	canceled     bool
+	cancelReq    *Request
 	timer_g      *time.Timer
 	timer_g_time time.Duration
 	timer_h      *time.Timer
@@ -183,6 +186,14 @@ func (tx *ServerTx) OnCancel(f FnTxCancel) bool {
 	if tx.closed {
 		tx.mu.Unlock()
 		return false
+	}
+	if tx.canceled {
+		r := tx.cancelReq
+		tx.mu.Unlock()
+		if f != nil {
+			f(r)
+		}
+		return true
 	}
 	tx.registerOnCancel(f)
 	tx.mu.Unlock()
