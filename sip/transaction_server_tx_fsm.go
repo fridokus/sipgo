@@ -300,6 +300,25 @@ func (tx *ServerTx) actCancel() fsmInput {
 		return FsmInputNone
 	}
 
+	if tx.proxyCancel {
+		// RFC 3261 section 16.10 / section 16.7 step 5: a stateful proxy
+		// answers CANCEL with 200 OK (already written in handleRequest) and
+		// notifies its TU without sending 487, leaving the INVITE server
+		// transaction open in Proceeding to relay whichever final response
+		// downstream produces (487 or a crossing 200 OK, RFC 5407 section 3.1.2).
+		tx.log.Debug("Notifying proxy of CANCEL without synthesizing 487", "tx", tx.Key())
+		tx.mu.Lock()
+		already := tx.canceled
+		tx.canceled = true
+		tx.cancelReq = r
+		onCancel := tx.onCancel
+		tx.mu.Unlock()
+		if !already && onCancel != nil {
+			onCancel(r)
+		}
+		return FsmInputNone
+	}
+
 	tx.log.Debug("Passing 487 on CANCEL", "tx", tx.Key())
 	tx.fsmResp = NewResponseFromRequest(tx.origin, StatusRequestTerminated, "Request Terminated", nil)
 	tx.fsmErr = ErrTransactionCanceled // For now only informative
