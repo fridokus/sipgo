@@ -10,6 +10,8 @@ import (
 	"net/netip"
 	"sync"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
 var (
@@ -45,6 +47,17 @@ type TransportLayer struct {
 	// dnsPreferSRV does always SRV lookup first
 	dnsPreferSRV bool
 	dnsPreferIP  int // 0 - no preference , 1 -ip4, 2 - ip6
+
+	dnsCacheTTL time.Duration
+	dnsCacheMu  sync.RWMutex
+	dnsCache    map[string]dnsCacheEntry
+	dnsFlight   singleflight.Group
+	dnsNow      func() time.Time
+}
+
+type dnsCacheEntry struct {
+	ips       []net.IPAddr
+	expiresAt time.Time
 }
 
 type TransportLayerOption func(l *TransportLayer)
@@ -72,6 +85,16 @@ func WithTransportLayerDNSLookupSRV(preferSRV bool) TransportLayerOption {
 func WithTransportLayerReadFilter(f TransportReadFilter) TransportLayerOption {
 	return func(l *TransportLayer) {
 		l.readFilter = f
+	}
+}
+
+// WithTransportLayerDNSCacheTTL caches positive IP lookup results for ttl,
+// coalescing concurrent lookups for the same hostname. Negative results
+// (errors and empty answers) are never cached. A non-positive ttl disables
+// caching (the default).
+func WithTransportLayerDNSCacheTTL(ttl time.Duration) TransportLayerOption {
+	return func(l *TransportLayer) {
+		l.dnsCacheTTL = ttl
 	}
 }
 
@@ -121,6 +144,7 @@ func NewTransportLayer(
 		connectionReuse: true,
 		log:             DefaultLogger().With("caller", "TransportLayer"),
 		dnsPreferIP:     1, // IPV4
+		dnsNow:          time.Now,
 	}
 
 	for _, o := range option {
@@ -683,7 +707,7 @@ func (l *TransportLayer) resolveAddrIP(ctx context.Context, hostname string, add
 	l.log.Debug("DNS Resolving", "host", hostname)
 
 	// Do local resolving
-	ips, err := l.dnsResolver.LookupIPAddr(ctx, hostname)
+	ips, err := l.lookupIPAddr(ctx, hostname)
 	if err != nil {
 		return err
 	}
@@ -714,6 +738,87 @@ func (l *TransportLayer) resolveAddrIP(ctx context.Context, hostname string, add
 	addr.IP = ips[0].IP
 	addr.Zone = ips[0].Zone
 	return nil
+}
+
+func (l *TransportLayer) now() time.Time {
+	if l.dnsNow != nil {
+		return l.dnsNow()
+	}
+	return time.Now()
+}
+
+const dnsCacheLookupTimeout = 10 * time.Second
+const dnsCacheMaxEntries = 1024
+
+func (l *TransportLayer) lookupIPAddr(ctx context.Context, hostname string) ([]net.IPAddr, error) {
+	if l.dnsCacheTTL <= 0 {
+		return l.dnsResolver.LookupIPAddr(ctx, hostname)
+	}
+
+	now := l.now()
+	l.dnsCacheMu.RLock()
+	entry, ok := l.dnsCache[hostname]
+	l.dnsCacheMu.RUnlock()
+	if ok && now.Before(entry.expiresAt) {
+		return entry.ips, nil
+	}
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	ch := l.dnsFlight.DoChan(hostname, func() (any, error) {
+		now := l.now()
+		l.dnsCacheMu.RLock()
+		entry, ok := l.dnsCache[hostname]
+		l.dnsCacheMu.RUnlock()
+		if ok && now.Before(entry.expiresAt) {
+			return entry.ips, nil
+		}
+
+		// Detach from a single caller's cancellation so one timed-out request
+		// does not abort a shared lookup for other callers waiting on the same
+		// hostname, while bounding the underlying lookup.
+		lookupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), dnsCacheLookupTimeout)
+		defer cancel()
+
+		ips, err := l.dnsResolver.LookupIPAddr(lookupCtx, hostname)
+		if err != nil || len(ips) == 0 {
+			return ips, err
+		}
+
+		copied := make([]net.IPAddr, len(ips))
+		copy(copied, ips)
+		expiresAt := l.now().Add(l.dnsCacheTTL)
+
+		l.dnsCacheMu.Lock()
+		if l.dnsCache == nil {
+			l.dnsCache = make(map[string]dnsCacheEntry)
+		}
+		if len(l.dnsCache) >= dnsCacheMaxEntries {
+			now := l.now()
+			for k, v := range l.dnsCache {
+				if !now.Before(v.expiresAt) {
+					delete(l.dnsCache, k)
+				}
+			}
+		}
+		l.dnsCache[hostname] = dnsCacheEntry{ips: copied, expiresAt: expiresAt}
+		l.dnsCacheMu.Unlock()
+
+		return copied, nil
+	})
+
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case res := <-ch:
+		if res.Err != nil {
+			return nil, res.Err
+		}
+		ips, _ := res.Val.([]net.IPAddr)
+		return ips, nil
+	}
 }
 
 func (l *TransportLayer) resolveAddrSRV(ctx context.Context, network string, hostname string, sipScheme string, addr *Addr) error {
