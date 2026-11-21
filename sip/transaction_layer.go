@@ -28,6 +28,7 @@ type TransactionLayer struct {
 	serverTransactions *transactionStore[*ServerTx]
 
 	terminateOnConnClose bool
+	proxyCancel          bool
 
 	log *slog.Logger
 }
@@ -56,6 +57,21 @@ func WithTransactionLayerUnhandledResponseHandler(f func(r *Response)) Transacti
 func WithTransactionLayerTerminateOnConnClose() TransactionLayerOption {
 	return func(txl *TransactionLayer) {
 		txl.terminateOnConnClose = true
+	}
+}
+
+// WithTransactionLayerProxyCancel keeps an INVITE server transaction in the
+// Proceeding state when a matching CANCEL arrives instead of automatically
+// answering 487 (Request Terminated).
+//
+// Per RFC 3261 section 16.10 and section 16.7 step 5, a stateful proxy answers
+// the CANCEL with 200 OK and forwards CANCEL downstream while leaving the
+// upstream INVITE server transaction open so whichever final response arrives
+// from downstream — 487 or a crossing 200 OK (RFC 5407 section 3.1.2) — can be
+// relayed upstream.
+func WithTransactionLayerProxyCancel() TransactionLayerOption {
+	return func(txl *TransactionLayer) {
+		txl.proxyCancel = true
 	}
 }
 
@@ -261,6 +277,7 @@ func (txl *TransactionLayer) serverTxRequest(req *Request, key string) error {
 	}
 
 	tx = NewServerTx(key, req, conn, txl.log)
+	tx.proxyCancel = txl.proxyCancel
 	if err := tx.Init(); err != nil {
 		txl.serverTransactions.unlock()
 		// Init failed: this tx never reaches delete(), so release the connection
@@ -291,6 +308,7 @@ func (txl *TransactionLayer) serverTxCreate(req *Request, key string) (*ServerTx
 	}
 
 	tx := NewServerTx(key, req, conn, txl.log)
+	tx.proxyCancel = txl.proxyCancel
 	if err := tx.Init(); err != nil {
 		// Init failed: this tx never reaches delete(), so release the connection
 		// reference serverRequestConnection took here (mirrors the conn.TryClose
